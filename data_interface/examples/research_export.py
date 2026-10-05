@@ -1,6 +1,7 @@
 """Export a scoped research query to CSV or NDJSON."""
 
 import argparse
+from pathlib import Path
 
 from csmap_client import CsmapClient, CsmapError
 
@@ -16,6 +17,7 @@ def main() -> None:
     parser.add_argument("--type", choices=("posts", "comments"), default="posts")
     parser.add_argument("--min-score", type=int)
     parser.add_argument("--url")
+    parser.add_argument("--api-key-file", type=Path)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -27,8 +29,8 @@ def main() -> None:
         "min_score": args.min_score,
         "overwrite": args.overwrite,
     }
-    client = CsmapClient(base_url=args.url, timeout=args.timeout)
     try:
+        client = CsmapClient(base_url=args.url, api_key_file=args.api_key_file, timeout=args.timeout)
         if args.keywords:
             path = client.export_search(args.keywords, args.output, type=args.type, **options)
         else:

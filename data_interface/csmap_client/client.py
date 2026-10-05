@@ -15,12 +15,17 @@ class CsmapClient:
         self,
         base_url: str | None = None,
         *,
+        api_key: str | None = None,
+        api_key_file: str | Path | None = None,
         timeout: float = 120,
         max_retries: int = 2,
         backoff: float = 0.5,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        self._transport = Transport(base_url, timeout, max_retries, backoff, headers)
+        self._transport = Transport(
+            base_url, timeout, max_retries, backoff, headers,
+            api_key=api_key, api_key_file=api_key_file,
+        )
 
     @staticmethod
     def _filters(filters: Filters | None, overrides: dict[str, Any]) -> Filters:

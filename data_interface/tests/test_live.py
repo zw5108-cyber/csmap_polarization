@@ -1,4 +1,4 @@
-"""Opt-in integration checks against a narrowly scoped public archive query."""
+"""Opt-in authenticated integration checks against narrowly scoped queries."""
 
 import csv
 import json
@@ -10,7 +10,7 @@ import unittest
 from csmap_client import CsmapClient, Filters
 
 
-@unittest.skipUnless(os.environ.get("CSMAP_LIVE_TESTS") == "1", "Set CSMAP_LIVE_TESTS=1 to query the public service")
+@unittest.skipUnless(os.environ.get("CSMAP_LIVE_TESTS") == "1", "Set CSMAP_LIVE_TESTS=1 to query the service with your API key")
 class LiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -34,21 +34,48 @@ class LiveTests(unittest.TestCase):
         rows = list(self.client.iter_posts(filters=self.scope, max_items=12))
         self.assertEqual(len(rows), 12)
         self.assertTrue(all(row["subreddit"] == "science" for row in rows))
-        self.assertTrue(all(row["created_at"].startswith("2024-01-15") for row in rows))
+        self.assertTrue(all("2024-01-15" <= row["created_at"][:10] <= "2024-01-16" for row in rows))
         self.assertEqual(len({row["id"] for row in rows}), 12)
+
+    def test_posts_include_the_entire_before_date(self):
+        page = self.client.posts(
+            subreddit="science", after="2024-01-16", before="2024-01-16",
+            sort="date", order="desc", limit=10,
+        )
+        self.assertTrue(page.items)
+        self.assertTrue(all(row["created_at"].startswith("2024-01-16") for row in page.items))
 
     def test_search_shape(self):
         page = self.client.search("climate", subreddit="science", after="2024-01-01", before="2024-02-01", limit=10)
         self.assertTrue(page.items)
         self.assertIn("results", page.raw)
-        self.assertIsNone(page.total)
+        if page.total is not None:
+            self.assertGreaterEqual(page.total, len(page.items))
+        if page.total_pages is not None:
+            self.assertGreaterEqual(page.total_pages, page.page)
+
+    def test_boolean_search_operators(self):
+        queries = ("vaccine", "vaccine OR csmapnonexistenttoken", "vaccine AND covid", "vaccine NOT covid")
+        pages = {
+            query: self.client.search(
+                query, subreddit="science", after="2024-01-01", before="2024-01-31", limit=200,
+            )
+            for query in queries
+        }
+        self.assertTrue(pages["vaccine"].items)
+        self.assertTrue(all(not page.has_more for page in pages.values()))
+        ids = {query: {row["id"] for row in page.items} for query, page in pages.items()}
+        self.assertEqual(ids["vaccine"], ids["vaccine OR csmapnonexistenttoken"])
+        self.assertEqual(ids["vaccine"], ids["vaccine AND covid"] | ids["vaccine NOT covid"])
+        self.assertTrue(ids["vaccine AND covid"].isdisjoint(ids["vaccine NOT covid"]))
 
     def test_user_community_and_monthly_aggregates(self):
-        options = {"after": "2024-01-01", "before": "2024-02-01", "limit": 10}
+        options = {"after": "2024-01-01", "before": "2024-01-31", "limit": 10}
         for fetch in (self.client.user_posts, self.client.user_comments, self.client.user_communities, self.client.user_timeseries):
             with self.subTest(method=fetch.__name__):
                 self.assertTrue(fetch("mvea", **options).items)
         self.assertTrue(self.client.subreddit_users("science", **options).items)
+        self.assertTrue(self.client.subreddit_timeseries("science", **options).items)
         self.assertTrue(self.client.subreddits(limit=10).items)
 
     def test_full_exports_have_all_matches_and_extra_text_fields(self):
@@ -65,6 +92,7 @@ class LiveTests(unittest.TestCase):
             self.assertGreater(len(records), page.limit)
             self.assertIn("selftext", records[0])
             self.assertIn("domain", records[0])
+            self.assertIn("reddit_url", csv_records[0])
 
     def test_other_native_export_routes(self):
         with tempfile.TemporaryDirectory() as directory:

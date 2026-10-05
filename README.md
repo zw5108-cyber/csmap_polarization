@@ -8,6 +8,7 @@
 data_interface/
   README.md          接口调用说明
   pyproject.toml     接口模块的 Python 打包配置
+  api_key.example.txt 个人 API key 的无密钥模板
   csmap_client/      Python 客户端源码
   examples/          数据导出示例
   tests/             离线测试和可选在线集成测试
@@ -21,7 +22,9 @@ data_interface/
 python -m pip install -e ./data_interface
 ```
 
-安装后，研究脚本或 Notebook 可以直接导入：
+使用前，将个人密钥填写到本地 `data_interface/api_key.txt`，只保留一行密钥。首次克隆时，先复制 `data_interface/api_key.example.txt` 为 `data_interface/api_key.txt`，再替换占位文字。真实密钥文件已被 Git 忽略，不应提交到公开仓库。`CsmapClient()` 在本仓库中会自动读取该文件，与脚本的启动目录无关。
+
+安装并配置密钥后，研究脚本或 Notebook 可以直接导入：
 
 ```python
 from csmap_client import CsmapClient, Filters
@@ -34,5 +37,5 @@ from csmap_client import CsmapClient, Filters
 安装模块后，可以从研究仓库根目录执行离线测试：
 
 ```powershell
-python -m unittest discover -s data_interface/tests -p test_client.py -v
+python -m unittest discover -s data_interface/tests -v
 ```

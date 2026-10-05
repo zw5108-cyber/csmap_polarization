@@ -4,6 +4,8 @@ import http.client
 import json
 import math
 import os
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import tempfile
 import time
@@ -12,6 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from .auth import authorization_headers
 from .errors import ApiError, AuthenticationError, NetworkError, ResponseError
 
 DEFAULT_URL = "https://csmap-social-archive.apps.cloud.rt.nyu.edu"
@@ -27,6 +30,9 @@ class Transport:
         max_retries: int,
         backoff: float,
         headers: Mapping[str, str] | None,
+        *,
+        api_key: str | None = None,
+        api_key_file: str | Path | None = None,
     ) -> None:
         self.base_url = (base_url or os.environ.get("CSMAP_URL") or DEFAULT_URL).rstrip("/")
         parsed = urlsplit(self.base_url)
@@ -40,18 +46,27 @@ class Transport:
         if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
             raise ValueError("max_retries must be a non-negative integer")
         self.timeout, self.max_retries, self.backoff = timeout, max_retries, backoff
-        self.headers = {"User-Agent": "csmap-python-client/0.1.0", **dict(headers or {})}
+        self.headers = {
+            "User-Agent": "csmap-python-client/0.2.0",
+            **authorization_headers(headers, api_key, api_key_file),
+        }
 
     def _delay(self, attempt: int, retry_after: str | None = None) -> None:
-        delay = self.backoff * (2 ** min(attempt, 10))
+        delay = min(30.0, self.backoff * (2 ** min(attempt, 10)))
         if retry_after:
             try:
                 server_delay = float(retry_after)
-                if math.isfinite(server_delay):
-                    delay = max(delay, server_delay)
             except ValueError:
-                pass
-        time.sleep(min(30.0, max(0.0, delay)))
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    server_delay = retry_at.timestamp() - time.time()
+                except (TypeError, ValueError, OverflowError):
+                    server_delay = 0.0
+            if math.isfinite(server_delay):
+                delay = max(delay, server_delay)
+        time.sleep(max(0.0, delay))
 
     def open(self, path: str, params: Mapping[str, Any], accept: str):
         if not path.startswith("/api/v1/") or "?" in path or "#" in path:
@@ -76,6 +91,14 @@ class Transport:
                         detail = str(payload.get("message") or payload.get("error") or detail)
                 except ValueError:
                     pass
+                authorization = next(
+                    (value for name, value in self.headers.items() if name.lower() == "authorization"), "",
+                )
+                if authorization.lower().startswith("bearer "):
+                    detail = detail.replace(authorization, "[redacted]")
+                    key = authorization[7:].strip()
+                    if key:
+                        detail = detail.replace(key, "[redacted]")
                 error_type = AuthenticationError if status in (401, 403) else ApiError
                 raise error_type(status, path, detail.strip()[:500]) from None
             except NETWORK_EXCEPTIONS as error:

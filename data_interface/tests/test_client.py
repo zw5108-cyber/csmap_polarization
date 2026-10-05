@@ -54,6 +54,9 @@ def http_error(status, *, retry_after=None):
 
 class ClientTests(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict("os.environ", {"CSMAP_API_KEY": "offline-test-key"})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.client = CsmapClient("https://example.test", max_retries=0, backoff=0)
 
     @patch("csmap_client.transport.urlopen")
@@ -101,6 +104,37 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(search.has_more)
         series = Page.from_payload({"data": [{"period": "2024-01"}] * 25, "meta": {"frequency": "month"}}, Filters())
         self.assertFalse(series.has_more)
+
+    def test_search_totals_support_root_and_nested_metadata(self):
+        for payload in (
+            {"results": [{"id": "a"}], "page": 1, "limit": 10, "total": 322, "total_pages": 33},
+            {"results": [{"id": "a"}], "meta": {"page": 1, "limit": 10, "total": 322, "total_pages": 33}},
+        ):
+            with self.subTest(payload=payload):
+                page = Page.from_payload(payload, Filters(limit=10))
+                self.assertEqual((page.total, page.total_pages, page.has_more), (322, 33, True))
+                self.assertIs(page.raw, payload)
+
+    @patch("csmap_client.transport.urlopen")
+    def test_boolean_search_and_date_boundaries_are_forwarded_unchanged(self, request):
+        for keywords in ("climate AND policy", "vaccine NOT covid", "brexit OR referendum"):
+            with self.subTest(keywords=keywords):
+                request.return_value = json_response({"results": [], "has_more": False})
+                self.client.search(keywords, after="2024-01-01", before="2024-01-31", min_score=0)
+                params = parse_qs(urlsplit(request.call_args.args[0].full_url).query)
+                self.assertEqual(params["q"], [keywords])
+                self.assertEqual(params["after"], ["2024-01-01"])
+                self.assertEqual(params["before"], ["2024-01-31"])
+                self.assertEqual(params["min_score"], ["0"])
+
+    @patch("csmap_client.transport.urlopen")
+    def test_explicit_search_end_takes_precedence_over_total(self, request):
+        request.return_value = json_response({
+            "results": [{"id": "a"}], "page": 1, "limit": 10,
+            "total": 20000, "total_pages": 2000, "has_more": False,
+        })
+        self.assertEqual([row["id"] for row in self.client.iter_search("climate")], ["a"])
+        self.assertEqual(request.call_count, 1)
 
     def test_invalid_response_is_not_silently_empty(self):
         for payload in ({"error": "not records"}, {"data": [1]}, {"data": [], "has_more": "false"}, {"data": [], "meta": {"total": -1}}):
@@ -174,6 +208,34 @@ class ClientTests(unittest.TestCase):
 
     @patch("csmap_client.transport.time.sleep")
     @patch("csmap_client.transport.urlopen")
+    def test_retry_after_is_not_capped_at_thirty_seconds(self, request, sleep):
+        request.side_effect = [http_error(429, retry_after="90"), json_response({"status": "operational"})]
+        CsmapClient("https://example.test").stats()
+        sleep.assert_called_once_with(90.0)
+
+    @patch("csmap_client.transport.time.time", return_value=0)
+    @patch("csmap_client.transport.time.sleep")
+    @patch("csmap_client.transport.urlopen")
+    def test_retry_after_supports_http_date(self, request, sleep, clock):
+        request.side_effect = [
+            http_error(429, retry_after="Thu, 01 Jan 1970 00:02:00 GMT"),
+            json_response({"status": "operational"}),
+        ]
+        CsmapClient("https://example.test").stats()
+        sleep.assert_called_once_with(120.0)
+
+    @patch("csmap_client.transport.time.sleep")
+    @patch("csmap_client.transport.urlopen")
+    def test_invalid_retry_after_uses_bounded_backoff(self, request, sleep):
+        for retry_after in ("not a date", "nan", "inf", "-5"):
+            with self.subTest(retry_after=retry_after):
+                sleep.reset_mock()
+                request.side_effect = [http_error(429, retry_after=retry_after), json_response({"status": "operational"})]
+                CsmapClient("https://example.test", backoff=100).stats()
+                sleep.assert_called_once_with(30.0)
+
+    @patch("csmap_client.transport.time.sleep")
+    @patch("csmap_client.transport.urlopen")
     def test_persistent_server_failure_has_bounded_retries(self, request, sleep):
         request.side_effect = [http_error(500), http_error(500), http_error(500)]
         with self.assertRaises(ApiError) as caught:
@@ -198,7 +260,7 @@ class ClientTests(unittest.TestCase):
 
     @patch("csmap_client.transport.urlopen")
     def test_streaming_export_is_full_result_and_bounded_memory(self, request):
-        body = (json.dumps({"id": "a", "selftext": "x" * 1000}) + "\n").encode() * 100
+        body = (json.dumps({"id": "a", "selftext": "x" * 1000, "reddit_url": "https://www.reddit.com/comments/a/"}) + "\n").encode() * 100
         response = Response(body, "application/x-ndjson")
         request.return_value = response
         with tempfile.TemporaryDirectory() as directory:
@@ -225,7 +287,7 @@ class ClientTests(unittest.TestCase):
 
     @patch("csmap_client.transport.urlopen")
     def test_successful_explicit_overwrite_preserves_csv_bom(self, request):
-        body = b"\xef\xbb\xbfid,title\r\na,hello\r\n"
+        body = b"\xef\xbb\xbfid,title,reddit_url\r\na,hello,https://www.reddit.com/comments/a/\r\n"
         request.return_value = Response(body, "text/csv; charset=utf-8")
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "posts.csv"
